@@ -1,13 +1,12 @@
 import streamlit as st
 import whisper
 import os
-from moviepy.editor import VideoFileClip, TextClip, CompositeVideoClip
-from moviepy.video.tools.subtitles import SubtitlesClip
+import subprocess
 
 st.set_page_config(page_title="AutoSub Studio", layout="centered")
 
 st.title("🎬 Автоматичні субтитри")
-st.write("Завантажте відео та налаштуйте вигляд субтитрів під себе!")
+st.write("Завантажте відео та налаштуйте вигляд субтитрів!")
 
 # 1. Завантаження відео
 uploaded_file = st.file_uploader("Оберіть відеофайл (MP4, MOV)", type=["mp4", "mov"])
@@ -18,33 +17,78 @@ st.subheader("⚙️ Налаштування субтитрів")
 col1, col2 = st.columns(2)
 
 with col1:
-    # Вибір стилю
     style_option = st.selectbox(
         "Стиль субтитрів:",
         [
-            "1. TikTok (Жовтий з фоном)",
-            "2. Класика (Білий з тінню)",
+            "1. TikTok (Жовтий з чорним фоном)",
+            "2. Класика (Білий з чорним контуром)",
             "3. Неон (Яскраво-зелений)"
         ]
     )
-    
-    # Zoom In / Zoom Out (Розмір шрифту)
-    font_size = st.slider("🔍 Розмір шрифту (Zoom):", min_value=16, max_value=80, value=36, step=2)
+    font_size = st.slider("🔍 Розмір шрифту (Zoom):", min_value=20, max_value=90, value=50, step=2)
 
 with col2:
-    # Положення по вертикалі (Y)
-    y_position = st.slider("↕️ Положення по вертикалі (% від верху):", min_value=10, max_value=90, value=75, step=5)
-    
-    # Положення по горизонталі (X)
-    x_align = st.selectbox("↔️ Вирівнювання по горизонталі:", ["center", "left", "right"])
+    y_position = st.slider("↕️ Положення по вертикалі (% від верху):", min_value=10, max_value=95, value=80, step=5)
 
-# Функція для розбиття тексту по 3 слова
+# Функція конвертації часу для формату ASS
+def format_ass_time(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    centisecs = int((secs - int(secs)) * 100)
+    return f"{hours}:{minutes:02d}:{int(secs):02d}.{centisecs:02d}"
+
+# Функція для генерації файлу субтитрів (.ass)
+def generate_ass_file(subtitles_data, ass_path, font_size, y_position, style_option):
+    # Визначаємо кольори та стиль (Формат кольорів ASS: &HAlphaBlueGreenRed)
+    if "1." in style_option:
+        primary_color = "&H0000FFFF"  # Жовтий
+        outline_color = "&H00000000"  # Чорний
+        back_color = "&H00000000"     # Непрозорий чорний фон
+        border_style = 3              # Прямокутник навколо тексту
+        outline = 2
+    elif "2." in style_option:
+        primary_color = "&H00FFFFFF"  # Білий
+        outline_color = "&H00000000"  # Чорний контур
+        back_color = "&H80000000"
+        border_style = 1              # Контур
+        outline = 3
+    else:
+        primary_color = "&H0000FF00"  # Зелений неон
+        outline_color = "&H00000000"  # Чорний контур
+        back_color = "&H80000000"
+        border_style = 1
+        outline = 3
+
+    # Розрахунок відступу знизу (MarginV)
+    margin_v = int((100 - y_position) * 10.8)
+
+    ass_header = f"""[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,{font_size},{primary_color},&H00000000,{outline_color},{back_color},-1,0,0,0,100,100,0,0,{border_style},{outline},0,2,10,10,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(ass_header)
+        for (start, end), text in subtitles_data:
+            start_str = format_ass_time(start)
+            end_str = format_ass_time(end)
+            f.write(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{text}\n")
+
+# Розбиття на групи по 3 слова
 def group_words(segments, max_words=3):
-    grouped_subtitles = []
+    grouped = []
     for segment in segments:
         words = segment.get('words', [])
         if not words:
-            grouped_subtitles.append(((segment['start'], segment['end']), segment['text']))
+            grouped.append(((segment['start'], segment['end']), segment['text']))
             continue
             
         for i in range(0, len(words), max_words):
@@ -52,8 +96,8 @@ def group_words(segments, max_words=3):
             start_time = group[0]['start']
             end_time = group[-1]['end']
             text = " ".join([w['word'] for w in group])
-            grouped_subtitles.append(((start_time, end_time), text.strip()))
-    return grouped_subtitles
+            grouped.append(((start_time, end_time), text.strip()))
+    return grouped
 
 # --- ОБРОБКА ВІДЕО ---
 if uploaded_file is not None:
@@ -68,34 +112,22 @@ if uploaded_file is not None:
             result = model.transcribe("temp_input.mp4", language="uk", word_timestamps=True)
             subtitles_data = group_words(result['segments'], max_words=3)
 
-        with st.spinner("2/2 Накладаємо субтитри та рендеримо..."):
-            video = VideoFileClip("temp_input.mp4")
-            
-            # Налаштування кольорів залежно від стилю
-            is_style_1 = "1." in style_option
-            is_style_2 = "2." in style_option
-            
-            generator = lambda txt: TextClip(
-                txt,
-                font='Arial-Bold',
-                fontsize=font_size,  # Використовуємо розмір зі слайдера
-                color='yellow' if is_style_1 else ('white' if is_style_2 else '#00FF66'),
-                bg_color='black' if is_style_1 else None,
-                stroke_color='black' if (is_style_2 or not is_style_1) else None,
-                stroke_width=2 if (is_style_2 or not is_style_1) else 0,
-                method='caption',
-                size=(int(video.w * 0.85), None)
-            )
-
-            subtitles = SubtitlesClip(subtitles_data, generator)
-            
-            # Динамічне розрахування позиції (Y-вертикаль, X-горизонталь)
-            pos_y = video.h * (y_position / 100.0)
-            subtitles = subtitles.set_position((x_align, pos_y))
-            
-            final_video = CompositeVideoClip([video, subtitles])
+        with st.spinner("2/2 Швидке накладання субтитрів через FFmpeg..."):
+            ass_file = "subs.ass"
             output_path = "output_with_subs.mp4"
-            final_video.write_videofile(output_path, codec="libx264", audio_codec="aac")
+            
+            # Створюємо файл субтитрів
+            generate_ass_file(subtitles_data, ass_file, font_size, y_position, style_option)
+            
+            # Впікаємо субтитри через чистий FFmpeg
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", "temp_input.mp4",
+                "-vf", f"subtitles={ass_file}",
+                "-c:a", "copy",
+                output_path
+            ]
+            subprocess.run(cmd, check=True)
 
         st.success("Готово!")
         st.video(output_path)
